@@ -14,24 +14,23 @@
 # result of the SQL SELECT.
 #
 
-if test $# -lt 1; then
-    echo "usage: $0 <path>"
-    echo "Convert a syslog file into CSV format."
+_usage(){
+    echo "usage: $0 <logfile>"
+    echo "Converts lnav logs into CSV format, handy for pushing to bigdata services."
+    echo -e "\nExamples:"
+    echo "  $0 /var/log/syslog"
+    echo "  $0 /var/www/myapp/data/log/*.log"
     exit 1
-fi
-
-if test ! -f $1; then
-    echo "error: expecting a log file as the first argument"
-    exit 1
-fi
+}
 
 # Figure out a unique file name.
-out_file_base="$(basename $1)"
-counter=0
-while test -e "${out_file_base}.${counter}.csv"; do
-    counter=`expr ${counter} + 1`
-done
-export OUT_FILE="${out_file_base}.${counter}.csv"
+_get_unique_name(){
+  out_file_base="$(basename $1)"; counter=0
+  while test -e "${out_file_base}.${counter}.csv"; do
+      counter=`expr ${counter} + 1`
+  done
+  echo "${out_file_base}.${counter}.csv"
+}
 
 # Here's a quick summary of what this is doing:
 # 
@@ -48,19 +47,27 @@ export OUT_FILE="${out_file_base}.${counter}.csv"
 # 6. ':write-csv-to' will write out the log messages SELECTed in step #5.
 # 7. ':save-session' will save the bookmark we set so it can be loaded on
 #    future runs of this script.
+function dump(){
+  infile="$1"; [[ ! -n "$2" ]] && outfile="$(_get_unique_name "$infile")" || outfile="$2"
+  [[ ! -f "$infile" ]] && { echo "error: expecting a log file as the first argument"; exit 1; }
+  lnav -nq -d /tmp/lnav.err \
+      -c ":load-session" \
+      -c ";CREATE TABLE helper ( start_line int, max_line int )" \
+      -c ";INSERT INTO helper ( start_line, max_line ) VALUES (\
+          (SELECT coalesce(\
+              (SELECT max(log_line) FROM syslog_log where log_mark = 1) + 1,\
+              0)),\
+          (SELECT max(log_line) FROM syslog_log ))" \
+      -c ";UPDATE syslog_log SET log_mark = 1 where log_line = (\
+            SELECT max_line FROM helper)" \
+      -c ";SELECT *,log_text FROM syslog_log where log_line between (\
+          SELECT start_line FROM helper) and (SELECT max_line FROM helper)" \
+      -c ":write-csv-to $outfile" \
+      -c ":save-session" \
+      "$infile"
+}
 
-lnav -nq -d /tmp/lnav.err \
-    -c ":load-session" \
-    -c ";CREATE TABLE helper ( start_line int, max_line int )" \
-    -c ";INSERT INTO helper ( start_line, max_line ) VALUES (\
-        (SELECT coalesce(\
-            (SELECT max(log_line) FROM syslog_log where log_mark = 1) + 1,\
-            0)),\
-        (SELECT max(log_line) FROM syslog_log ))" \
-    -c ";UPDATE syslog_log SET log_mark = 1 where log_line = (\
-          SELECT max_line FROM helper)" \
-    -c ";SELECT *,log_text FROM syslog_log where log_line between (\
-        SELECT start_line FROM helper) and (SELECT max_line FROM helper)" \
-    -c ':write-csv-to $OUT_FILE' \
-    -c ":save-session" \
-    $1
+
+# main entry
+[[ ! -n "$1" ]] && _usage
+for file in "$@"; do dump "$file"; done
